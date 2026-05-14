@@ -1,0 +1,73 @@
+# Company-wide golangci-lint base configuration for the luvvano organization.
+#
+# This file is the single source of truth for Go code style and static
+# analysis across all organization repositories. It is pulled in automatically
+# by the reusable workflow .github/workflows/go_linter.yaml.
+#
+# Do not copy this file into individual repositories — the base-linter always
+# fetches the latest version from this repository.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  # "standard" enables errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unreachable-code
+        - name: var-declaration
+        - name: var-naming
+    misspell:
+      locale: US
+
+  exclusions:
+    generated: lax
+    rules:
+      # Test files are allowed to be a bit more relaxed.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/luvvano

@@ -1,0 +1,200 @@
+# Reusable workflow: company-wide Go base-linter for the luvvano organization.
+#
+# It enforces a single shared golangci-lint configuration (.golangci.yaml stored
+# in this repository) across every Go repository in the organization, so all
+# code is formatted and linted against the same standard.
+#
+# Minimum privileges required in the caller workflow:
+# permissions:
+#   contents: read          # required: checkout the code under analysis
+#   pull-requests: write    # optional: post the base-linter result comment
+#   checks: write           # optional: annotate findings in the PR
+
+on:
+  workflow_call:
+    inputs:
+      go_mod_path:
+        type: string
+        description: Path to the main go.mod file (used to pick the Go version).
+        required: false
+        default: go.mod
+      base_golangci_lint_version:
+        type: string
+        description: golangci-lint version used to run the base config.
+        required: false
+        default: v2.11.4
+      base_workflows_ref:
+        type: string
+        description: Ref of luvvano/base-workflows to load the shared .golangci.yaml from.
+        required: false
+        default: main
+      github_token_secret:
+        type: string
+        description: >-
+          Name of the secret holding a token with read access to private Go
+          modules under github.com/luvvano. Leave empty if the project has no
+          private module dependencies.
+        required: false
+        default: ""
+      runs_on:
+        type: string
+        description: Runner label for the job.
+        required: false
+        default: ubuntu-latest
+      gomaxprocs:
+        type: number
+        description: Value for the GOMAXPROCS environment variable.
+        required: false
+        default: 4
+      base_linter_args:
+        type: string
+        description: >-
+          Whitelisted extra args for the base linter. Only
+          '--build-tags=<comma-separated tags>' is currently allowed
+          (e.g. '--build-tags=integration,unit').
+        required: false
+        default: ""
+    outputs:
+      base_linter_outcome:
+        description: Outcome of the base-linter job.
+        value: ${{ jobs.base-linter.outputs.result }}
+
+env:
+  GOMAXPROCS: ${{ inputs.gomaxprocs }}
+  GOPRIVATE: github.com/luvvano
+
+jobs:
+  base-linter:
+    name: base-linter
+    runs-on: ${{ inputs.runs_on }}
+
+    outputs:
+      result: ${{ steps.run-base-linter.outcome }}
+
+    steps:
+      - name: Validate base_linter_args
+        if: ${{ inputs.base_linter_args != '' }}
+        env:
+          LINTER_ARGS: ${{ inputs.base_linter_args }}
+          ALLOWED_ARGS_PATTERN: '^--build-tags=[a-zA-Z0-9_,]+$'
+        run: |
+          if [[ ! "$LINTER_ARGS" =~ $ALLOWED_ARGS_PATTERN ]]; then
+            echo "::error::base_linter_args must match '${ALLOWED_ARGS_PATTERN}', got: '${LINTER_ARGS}'"
+            exit 1
+          fi
+
+      - name: Configure git for private modules
+        if: ${{ inputs.github_token_secret != '' }}
+        run: git config --global url."https://${{ secrets[inputs.github_token_secret] }}@github.com/luvvano".insteadOf "https://github.com/luvvano"
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Checkout shared base-linter config
+        uses: actions/checkout@v6
+        with:
+          repository: luvvano/base-workflows
+          ref: ${{ inputs.base_workflows_ref }}
+          path: .base-workflows-config
+
+      - name: Apply shared golangci-lint config
+        run: |
+          rm -f .golangci.yaml .golangci.yml
+          cp .base-workflows-config/.golangci.yaml .golangci.yaml
+          rm -rf .base-workflows-config
+
+      - name: Print golangci-lint config to be used
+        run: |
+          echo "Config file to be used:"
+          cat .golangci.yaml
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ inputs.go_mod_path }}
+          cache-dependency-path: "**/*.sum"
+
+      - name: Run golangci-lint
+        id: run-base-linter
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ inputs.base_golangci_lint_version }}
+          skip-cache: true
+          skip-save-cache: true
+          verify: false
+          args: ${{ inputs.base_linter_args }}
+          only-new-issues: true
+
+      - name: Post success comment
+        if: ${{ always() && steps.run-base-linter.outcome == 'success' && github.event_name == 'pull_request' }}
+        uses: mshick/add-pr-comment@v3
+        with:
+          message-id: base-linter-result
+          message: |
+            ## 🟢 Company-wide base-linter success 🟢
+
+            No issues detected by the company-wide base linter. Nice work!
+
+            Config: [luvvano/base-workflows/.golangci.yaml](https://github.com/luvvano/base-workflows/blob/${{ inputs.base_workflows_ref }}/.golangci.yaml)
+
+      - name: Post failure comment
+        if: ${{ always() && steps.run-base-linter.outcome == 'failure' && github.event_name == 'pull_request' }}
+        uses: mshick/add-pr-comment@v3
+        with:
+          message-id: base-linter-result
+          message: |
+            ## 🔴 Company-wide base-linter failure 🔴
+
+            The company-wide base linter found issues in this service. Please resolve them before merging.
+
+            Config: [luvvano/base-workflows/.golangci.yaml](https://github.com/luvvano/base-workflows/blob/${{ inputs.base_workflows_ref }}/.golangci.yaml)
+
+            ### Run locally
+
+            ```bash
+            curl -sSL https://raw.githubusercontent.com/luvvano/base-workflows/${{ inputs.base_workflows_ref }}/.golangci.yaml -o .golangci.yaml
+            golangci-lint run
+            ```
+
+            To auto-fix what can be fixed automatically:
+
+            ```bash
+            golangci-lint run --fix
+            ```
+
+      - name: Generate base-linter summary block
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.run-base-linter.outcome }}" == "success" ]; then
+            cat >> summary-base-linter.md << 'EOF'
+          ## 🟢 Company-wide base-linter success 🟢
+          EOF
+          else
+            cat >> summary-base-linter.md << 'EOF'
+          ## 🔴 Company-wide base-linter failure 🔴
+
+          The company-wide base linter found issues. To run locally:
+
+          ```bash
+          curl -sSL https://raw.githubusercontent.com/luvvano/base-workflows/main/.golangci.yaml -o .golangci.yaml
+          golangci-lint run
+          ```
+
+          To auto-fix:
+
+          ```bash
+          golangci-lint run --fix
+          ```
+          EOF
+          fi
+
+      - name: Upload base-linter summary block
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: summary-report-base-linter
+          path: summary-base-linter.md
+          if-no-files-found: ignore
