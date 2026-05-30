@@ -45,6 +45,13 @@ on:
         description: Command that runs the tests and must create the coverage file.
         required: false
         default: go test -v -race -coverpkg=./... -coverprofile coverage.out ./...
+      exclude_generated_from_coverage:
+        type: boolean
+        description: >-
+          Drop generated files (those marked `// Code generated ... DO NOT EDIT`)
+          from the coverage profile before computing the percentage.
+        required: false
+        default: true
     secrets:
       private_modules_token:
         description: >-
@@ -99,6 +106,30 @@ jobs:
 
       - name: Check that coverage file exists
         run: test -f ${{ inputs.coverage_file }}
+
+      - name: Exclude generated files from coverage
+        if: ${{ inputs.exclude_generated_from_coverage }}
+        shell: bash
+        run: |
+          COVERAGE_FILE="${{ inputs.coverage_file }}"
+          MODULE=$(go list -m)
+
+          # Collect generated Go files as their coverage-profile paths
+          # (module path + path relative to the module root).
+          PATTERNS=$(mktemp)
+          while IFS= read -r f; do
+            echo "${MODULE}/${f#./}:"
+          done < <(grep -rlE '^// Code generated .* DO NOT EDIT\.$' --include='*.go' . || true) > "$PATTERNS"
+
+          COUNT=$(grep -c . "$PATTERNS" || true)
+          echo "Excluding ${COUNT} generated file(s) from coverage."
+          if [ "${COUNT}" -gt 0 ]; then
+            cat "$PATTERNS" | sed 's/^/  /'
+            # Keep the mode line and every line that is NOT a generated file.
+            grep -vF -f "$PATTERNS" "$COVERAGE_FILE" > "${COVERAGE_FILE}.filtered"
+            mv "${COVERAGE_FILE}.filtered" "$COVERAGE_FILE"
+          fi
+          rm -f "$PATTERNS"
 
       - name: Extract coverage
         id: extract-coverage
