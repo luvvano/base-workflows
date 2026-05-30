@@ -28,16 +28,6 @@ on:
         description: Ref of luvvano/base-workflows to load the shared .golangci.yaml from.
         required: false
         default: main
-      github_token_secret:
-        type: string
-        description: >-
-          Deprecated. Name of the secret holding a token with read access to
-          private Go modules under github.com/luvvano. Prefer passing the token
-          directly via the 'private_modules_token' secret instead — dynamic
-          secret-name lookup does not work reliably with 'secrets: inherit'.
-          Leave empty if the project has no private module dependencies.
-        required: false
-        default: ""
       runs_on:
         type: string
         description: Runner label for the job.
@@ -93,9 +83,9 @@ jobs:
           fi
 
       - name: Configure git for private modules
-        if: ${{ secrets.private_modules_token != '' || inputs.github_token_secret != '' }}
+        if: ${{ secrets.private_modules_token != '' }}
         env:
-          PRIVATE_TOKEN: ${{ secrets.private_modules_token != '' && secrets.private_modules_token || secrets[inputs.github_token_secret] }}
+          PRIVATE_TOKEN: ${{ secrets.private_modules_token }}
         run: git config --global url."https://x-access-token:${PRIVATE_TOKEN}@github.com/".insteadOf "https://github.com/"
 
       - name: Checkout code
