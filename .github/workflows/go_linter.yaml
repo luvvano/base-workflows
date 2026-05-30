@@ -50,7 +50,7 @@ on:
       private_modules_token:
         description: >-
           Token with read access to private github.com/luvvano Go modules.
-          Pass it directly, e.g. 'private_modules_token: ${{ secrets.GH_PAT }}'.
+          Pass it directly from a caller secret such as GH_PAT.
           Leave unset if the project has no private module dependencies.
         required: false
     outputs:
