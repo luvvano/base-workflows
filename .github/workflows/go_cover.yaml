@@ -22,21 +22,17 @@ on:
         required: false
         default: ubuntu-latest
       unit_tests_coverage:
-        type: number
+        type: string
         description: Coverage percentage produced by the unit tests.
         required: false
-        default: 0
+        default: "0"
       required_minimum_coverage:
-        type: number
+        type: string
         description: >-
           Minimum coverage percentage. When the measured coverage is below this
           value the job fails. Set to 0 to disable the gate.
         required: false
-        default: 0
-    outputs:
-      coverage:
-        description: The coverage percentage that was checked.
-        value: ${{ inputs.unit_tests_coverage }}
+        default: "0"
 
 jobs:
   minimum_coverage:
