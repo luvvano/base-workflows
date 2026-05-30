@@ -1,0 +1,115 @@
+# Reusable workflow: Go unit tests + coverage extraction for the luvvano organization.
+#
+# Runs the test suite with coverage, extracts the total coverage percentage and
+# uploads the coverage profile as an artifact. The coverage value is exposed as
+# an output so a caller can feed it into go_cover.yaml for publishing and gating.
+#
+# Minimum privileges required in the caller workflow:
+# permissions:
+#   contents: read          # required: checkout the code under test
+#   pull-requests: write    # optional: post coverage comments downstream
+#   checks: write           # optional: annotate findings in the PR
+
+name: tests
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        description: Runner label for the job.
+        required: false
+        default: ubuntu-latest
+      go_mod_path:
+        type: string
+        description: Path to the main go.mod file (used to pick the Go version).
+        required: false
+        default: go.mod
+      gomaxprocs:
+        type: number
+        description: Value for the GOMAXPROCS environment variable.
+        required: false
+        default: 4
+      coverage_file:
+        type: string
+        description: Filepath to the coverage profile produced by the test command.
+        required: false
+        default: coverage.out
+      coverage_file_artifact_name:
+        type: string
+        description: Name of the artifact the coverage profile is uploaded under.
+        required: false
+        default: unit-coverage-file
+      go_run_tests_with_coverage_cmd:
+        type: string
+        description: Command that runs the tests and must create the coverage file.
+        required: false
+        default: go test -v -race -coverpkg=./... -coverprofile coverage.out ./...
+    secrets:
+      private_modules_token:
+        description: >-
+          Token with read access to private github.com/luvvano Go modules.
+          Pass it directly from a caller secret such as GH_PAT.
+          Leave unset if the project has no private module dependencies.
+        required: false
+    outputs:
+      outcome:
+        description: Outcome of the unit tests job.
+        value: ${{ jobs.unit_tests.outputs.outcome || 'unknown' }}
+      coverage:
+        description: Total coverage percentage from unit tests.
+        value: ${{ jobs.unit_tests.outputs.coverage || '0.0' }}
+
+env:
+  GOMAXPROCS: ${{ inputs.gomaxprocs }}
+  GOPRIVATE: github.com/luvvano
+
+jobs:
+  unit_tests:
+    name: Test code
+    runs-on: ${{ inputs.runs_on }}
+
+    # Exposed as a job-level env var because the secrets context cannot be used
+    # in step `if:` conditions, only inputs/env can.
+    env:
+      PRIVATE_TOKEN: ${{ secrets.private_modules_token }}
+
+    outputs:
+      outcome: ${{ steps.unit-tests.outcome || 'unknown' }}
+      coverage: ${{ steps.extract-coverage.outputs.COVERAGE || '0.0' }}
+
+    steps:
+      - name: Configure git for private modules
+        if: ${{ env.PRIVATE_TOKEN != '' }}
+        run: git config --global url."https://x-access-token:${PRIVATE_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ inputs.go_mod_path }}
+          cache-dependency-path: "**/*.sum"
+
+      - name: Unit tests
+        id: unit-tests
+        shell: bash
+        run: ${{ inputs.go_run_tests_with_coverage_cmd }}
+
+      - name: Check that coverage file exists
+        run: test -f ${{ inputs.coverage_file }}
+
+      - name: Extract coverage
+        id: extract-coverage
+        shell: bash
+        run: |
+          COVERAGE=$(go tool cover -func=${{ inputs.coverage_file }} | tail -n 1 | awk '{print $NF}' | tr -d '%')
+          echo "Total coverage: ${COVERAGE}%"
+          echo "COVERAGE=$COVERAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage file
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.coverage_file_artifact_name }}
+          path: ${{ inputs.coverage_file }}

@@ -1,0 +1,231 @@
+# Reusable workflow: publish Go coverage and enforce a minimum for the luvvano organization.
+#
+# Takes the coverage percentage produced by go_unit.yaml and:
+#   * publishes it as a `coverage` check run and a PR comment;
+#   * optionally fails the PR when coverage is below `required_minimum_coverage`;
+#   * optionally fails the PR when coverage dropped versus the default branch.
+#
+# Minimum privileges required in the caller workflow:
+# permissions:
+#   contents: read          # required
+#   checks: write           # required: write the coverage check run
+#   pull-requests: write    # required: post comments / request changes
+
+name: Coverage
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        description: Runner label for the job.
+        required: false
+        default: ubuntu-latest
+      unit_tests_coverage:
+        type: number
+        description: Coverage percentage produced by the unit tests.
+        required: false
+        default: 0.0
+      required_minimum_coverage:
+        type: number
+        description: >-
+          Minimum coverage percentage. When greater than 0, the PR fails if
+          coverage is below this value. Set to 0 to disable the gate.
+        required: false
+        default: 0
+      compare_coverage_with_default_branch:
+        type: boolean
+        description: Fail the PR when coverage is lower than the default branch coverage.
+        required: false
+        default: false
+    outputs:
+      coverage:
+        description: The published coverage percentage.
+        value: ${{ jobs.publish_coverage.outputs.coverage }}
+
+env:
+  MINIMUM_COVERAGE_CHECK_HEADER: "### AUTO: Minimum coverage check failed"
+  DEFAULT_BRANCH_COVERAGE_CHECK_HEADER: "### AUTO: Pull request coverage is lower than default branch coverage"
+  COMMIT_HASH: ${{ github.event.pull_request.head.sha || github.sha }}
+  COVERAGE_CHECK_NAME: coverage
+
+jobs:
+  publish_coverage:
+    name: Publish coverage
+    runs-on: ${{ inputs.runs_on }}
+
+    env:
+      COVERAGE: ${{ inputs.unit_tests_coverage }}
+      COVERAGE_EXISTING_CHECK_ID: ""
+
+    outputs:
+      coverage: ${{ inputs.unit_tests_coverage }}
+
+    steps:
+      - name: Check that coverage is a number
+        run: printf "%.1f" ${{ inputs.unit_tests_coverage }}
+
+      - name: Find existing coverage check
+        run: |
+          PREVIOUS_CHECK_ID=$(curl -sL \
+            --fail \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/commits/${{ env.COMMIT_HASH }}/check-runs | jq -r '.check_runs[] | select (.name == "coverage") | .id')
+
+          echo "COVERAGE_EXISTING_CHECK_ID=$PREVIOUS_CHECK_ID" >> $GITHUB_ENV
+
+      - name: Update coverage check
+        if: ${{ env.COVERAGE_EXISTING_CHECK_ID != '' }}
+        env:
+          URL: https://api.github.com/repos/${{ github.repository }}/check-runs/${{ env.COVERAGE_EXISTING_CHECK_ID }}
+        run: |
+          curl -L \
+            --fail \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            ${{ env.URL }} \
+            -d '{"name":"${{ env.COVERAGE_CHECK_NAME }}","head_sha":"${{ env.COMMIT_HASH }}","status":"completed","conclusion":"success","output":{"title":"coverage ${{ env.COVERAGE }}%","summary":"${{ env.COVERAGE }}"}}'
+
+      - name: Write check with coverage
+        if: ${{ env.COVERAGE_EXISTING_CHECK_ID == '' }}
+        run: |
+          curl -L \
+            --fail \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/check-runs \
+            -d '{"name":"${{ env.COVERAGE_CHECK_NAME }}","head_sha":"${{ env.COMMIT_HASH }}","status":"completed","conclusion":"success","output":{"title":"coverage ${{ env.COVERAGE }}%","summary":"${{ env.COVERAGE }}"}}'
+
+      - uses: mshick/add-pr-comment@v3
+        if: github.event_name == 'pull_request'
+        with:
+          message-id: coverage-report
+          message: |
+            #### Tests successfully finished
+            Code coverage: ${{ env.COVERAGE }}%
+
+  minimum_coverage_check:
+    name: Minimum coverage check
+
+    if: github.event_name == 'pull_request' && success() && inputs.required_minimum_coverage > 0
+
+    runs-on: ${{ inputs.runs_on }}
+
+    env:
+      PR_COVERAGE: ${{ inputs.unit_tests_coverage }}
+
+    steps:
+      - name: Alarm if coverage is less than required
+        if: env.PR_COVERAGE < inputs.required_minimum_coverage
+        env:
+          BODY: "%s\n\nCoverage lower than required:\n| Metric           | Value    |\n|------------------|----------|\n| Requested        | %.2f%%   |\n| Current          | %.2f%%   |\n"
+        run: |
+          REQUEST_CHANGES_BODY=$(printf "${{ env.BODY }}" "${{ env.MINIMUM_COVERAGE_CHECK_HEADER }}" ${{ inputs.required_minimum_coverage }} ${{ env.PR_COVERAGE }})
+          PAYLOAD=$(jq -n --arg body_content "$REQUEST_CHANGES_BODY" '{event: "REQUEST_CHANGES", body: $body_content}')
+          curl -L \
+            --fail \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -X POST \
+            -d "$PAYLOAD" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews
+          exit 1
+
+      - name: Dismiss coverage alarm if coverage is more than required
+        if: env.PR_COVERAGE >= inputs.required_minimum_coverage
+        run: |
+          for REVIEW_ID in $(curl -L \
+            -s \
+            --fail \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews | \
+            jq -r '.[] | select(.user.login == "github-actions[bot]" and .state == "CHANGES_REQUESTED" and (.body | (type == "string" and startswith("${{ env.MINIMUM_COVERAGE_CHECK_HEADER }}")))) | .id'); do
+            echo "REVIEW_ID=$REVIEW_ID"
+
+            curl -L \
+              --fail \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -X PUT \
+              -d '{"message": "minimum coverage ok"}' \
+              https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews/$REVIEW_ID/dismissals
+
+          done
+
+  compare_coverage_to_default_branch:
+    name: Compare coverage with default branch
+
+    if: github.event_name == 'pull_request' && success() && inputs.compare_coverage_with_default_branch
+
+    runs-on: ${{ inputs.runs_on }}
+
+    env:
+      PR_COVERAGE: ${{ inputs.unit_tests_coverage }}
+
+    steps:
+      - name: Get default branch coverage
+        run: |
+          DEFAULT_BRANCH_COVERAGE=$(curl -sL \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          https://api.github.com/repos/${{ github.repository }}/commits/${{ github.event.repository.default_branch }}/check-runs | jq -rC '.check_runs[] | select (.name == "coverage") | .output.summary // 0.0')
+
+          echo "DEFAULT_BRANCH_COVERAGE=$(printf %.2f $DEFAULT_BRANCH_COVERAGE)" >> $GITHUB_ENV
+
+      - name: Calculate difference
+        run: |
+          COVERAGE_JSON=$(printf '{ "default_branch": %.2f, "pr": %.2f }' "${{ env.DEFAULT_BRANCH_COVERAGE }}" "${{ env.PR_COVERAGE }}")
+          COVERAGE_DIFF=$(printf '%.2f' $(echo $COVERAGE_JSON | jq '.result = .pr - .default_branch' | jq .result))
+          echo "COVERAGE_DIFF=$COVERAGE_DIFF" >> $GITHUB_ENV
+
+      - name: Alarm if coverage is less than default branch
+        if: env.COVERAGE_DIFF < 0
+        env:
+          BODY: "%s\n\nCoverage decrease detected:\n| Metric                    | Value             |\n|---------------------------|-------------------|\n| Default Branch Coverage   | %.2f%%   |\n| PR Coverage               | %.2f%%     |\n| Difference                | %.2f%%   |\n\n*NOTE: If you believe the coverage decrease is justified and you don't wish to write additional tests, you can dismiss this review with a clear explanation.*\n"
+        run: |
+          REQUEST_CHANGES_BODY=$(printf "${{ env.BODY }}" "${{ env.DEFAULT_BRANCH_COVERAGE_CHECK_HEADER }}" "${{ env.DEFAULT_BRANCH_COVERAGE }}" "${{ env.PR_COVERAGE }}" "${{ env.COVERAGE_DIFF }}")
+          PAYLOAD=$(jq -n --arg body_content "$REQUEST_CHANGES_BODY" '{event: "REQUEST_CHANGES", body: $body_content}')
+          curl -L \
+            --fail \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -X POST \
+            -d "$PAYLOAD" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews
+          exit 1
+
+      - name: Dismiss coverage alarm if coverage not less than default branch
+        if: env.COVERAGE_DIFF > 0
+        run: |
+          for REVIEW_ID in $(curl -L \
+            -s \
+            --fail \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews | \
+            jq -r '.[] | select(.user.login == "github-actions[bot]" and .state == "CHANGES_REQUESTED" and (.body | (type == "string" and startswith("${{ env.DEFAULT_BRANCH_COVERAGE_CHECK_HEADER }}")))) | .id'); do
+            echo "REVIEW_ID=$REVIEW_ID"
+
+            curl -L \
+              --fail \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -X PUT \
+              -d '{"message": "coverage fixed"}' \
+              https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews/$REVIEW_ID/dismissals
+
+          done
