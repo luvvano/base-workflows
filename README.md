@@ -93,8 +93,9 @@ jobs:
 ## Running tests and coverage in your repository
 
 Add a workflow that chains `go_unit.yaml` (runs the tests, extracts coverage)
-and `go_cover.yaml` (publishes coverage and enforces the minimum). The example
-below enforces a **minimum coverage of 60%**:
+and `go_cover.yaml` (fails when coverage is below the minimum). They show up as
+two independent checks — the tests and the coverage gate. The example below
+enforces a **minimum coverage of 60%**:
 
 ```yaml
 name: tests
@@ -106,8 +107,6 @@ on:
 
 jobs:
   unit:
-    permissions:
-      contents: read
     uses: luvvano/base-workflows/.github/workflows/go_unit.yaml@main
     secrets:
       # Only needed if the repo imports private github.com/luvvano modules.
@@ -115,21 +114,23 @@ jobs:
 
   coverage:
     needs: unit
-    permissions:
-      contents: read
-      checks: write
-      pull-requests: write
     uses: luvvano/base-workflows/.github/workflows/go_cover.yaml@main
     with:
       unit_tests_coverage: ${{ needs.unit.outputs.coverage }}
       required_minimum_coverage: 60
 ```
 
-On every pull request the tests run, the total coverage is published as a
-`coverage` check and a PR comment, and the PR is blocked with a *changes
-requested* review whenever coverage drops below `required_minimum_coverage`.
-Once coverage is back at or above the threshold the review is dismissed
-automatically.
+On every pull request you get two checks: **unit** (the tests, with the total
+coverage printed) and **coverage / minimum coverage** (the gate). The coverage
+check turns **red** whenever coverage drops below `required_minimum_coverage`
+and green otherwise — the measured-vs-required numbers are written to the job
+summary.
+
+> Do **not** add `permissions: { checks: write }` or `pull-requests: write` to
+> these jobs. Both workflows run within a read-only `GITHUB_TOKEN`. Requesting
+> write permissions above a repository's read-only default makes the job fail to
+> *start* — and a job that never starts posts no status, so a low-coverage PR
+> would wrongly look green.
 
 ### `go_unit.yaml` inputs
 
@@ -151,14 +152,13 @@ Outputs: `outcome` (test job outcome) and `coverage` (total coverage percentage)
 | Input | Default | Description |
 |-------|---------|-------------|
 | `runs_on` | `ubuntu-latest` | Runner label for the job. |
-| `unit_tests_coverage` | `0.0` | Coverage percentage to publish — pass `${{ needs.unit.outputs.coverage }}`. |
-| `required_minimum_coverage` | `0` | Minimum coverage. When `> 0`, the PR fails below this value. Set `60` to enforce 60%. |
-| `compare_coverage_with_default_branch` | `false` | When `true`, the PR fails if coverage dropped versus the default branch. |
+| `unit_tests_coverage` | `0` | Coverage percentage to check — pass `${{ needs.unit.outputs.coverage }}`. |
+| `required_minimum_coverage` | `0` | Minimum coverage. When the measured coverage is below this value the check fails. Set `60` to enforce 60%; `0` disables the gate. |
 
 `go_unit.yaml` accepts the same `private_modules_token` secret as the
 base-linter (see below) — omit it if the repo has no private
-`github.com/luvvano` module dependencies. `go_cover.yaml` needs no secrets; it
-only uses the built-in `GITHUB_TOKEN`.
+`github.com/luvvano` module dependencies. `go_cover.yaml` needs no secrets and
+no write permissions.
 
 ## Running the linter locally
 
