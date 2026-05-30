@@ -85,7 +85,7 @@ jobs:
 
       - name: Configure git for private modules
         if: ${{ inputs.github_token_secret != '' }}
-        run: git config --global url."https://${{ secrets[inputs.github_token_secret] }}@github.com/luvvano".insteadOf "https://github.com/luvvano"
+        run: git config --global url."https://x-access-token:${{ secrets[inputs.github_token_secret] }}@github.com/".insteadOf "https://github.com/"
 
       - name: Checkout code
         uses: actions/checkout@v6
