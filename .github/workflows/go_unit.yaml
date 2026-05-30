@@ -97,7 +97,12 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: ${{ inputs.go_mod_path }}
-          cache-dependency-path: "**/*.sum"
+          # Key the build/module cache on go.mod as well as go.sum, so adding a
+          # direct dependency (which changes go.mod but not always go.sum)
+          # invalidates a stale cache instead of restoring a poisoned one.
+          cache-dependency-path: |
+            **/go.sum
+            **/go.mod
 
       - name: Unit tests
         id: unit-tests
